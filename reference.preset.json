@@ -1,0 +1,28 @@
+{
+  "schema": "stripe-studio/v1",
+  "angle": -26,
+  "randomAngle": true,
+  "period": 34,
+  "share": 42,
+  "irregularity": 0,
+  "seed": 1234,
+  "videoOpacity": 0.65,
+  "format": "9:16",
+  "resolution": 1080,
+  "fps": 30,
+  "start": 0,
+  "duration": 0,
+  "audio": true,
+  "photo": {
+    "zoom": 1,
+    "x": 0.5,
+    "y": 0.5,
+    "mirror": false
+  },
+  "video": {
+    "zoom": 1,
+    "x": 0.5,
+    "y": 0.5,
+    "mirror": false
+  }
+}

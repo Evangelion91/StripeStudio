@@ -1,0 +1,11 @@
+# StripeStudio
+
+Цветное статичное фото + чёрно-белое видео в параллельных полосах → MP4. Windows, Python 3.10+ (рекомендуется 3.12), FFmpeg и FFprobe в PATH.
+
+1. Скачайте/клонируйте репозиторий и запустите `powershell -File .\install.ps1`.
+2. В новом терминале: `StripeStudio render --photo "photo.jpg" --video "video.mp4" --out "result.mp4"`.
+3. GUI: ярлык **StripeStudio** или `StripeStudio serve`. CLI не требует фонового сервера.
+
+По умолчанию: 65% видео + 35% фото внутри видеополос, фиксированные ширина и промежутки, один случайный общий угол на каждый экспорт. Для фиксированного угла: `--angle -26`.
+
+**Для агента установки:** выполните [AGENTS.md](AGENTS.md). API: `StripeStudio serve --no-open`, документация по адресу `/api/docs` запущенного процесса.
