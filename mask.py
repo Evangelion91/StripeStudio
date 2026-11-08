@@ -33,7 +33,7 @@ def polygons(template, width, height, group=None):
     minimum = -(abs(sine) * width + abs(cosine) * height) / 2
     first = math.floor((minimum - white) / period) + 1
     for index in range(math.floor(-length / period) - 2, math.ceil(length / period) + 3):
-        if group is not None and (index - first) % 3 != group:
+        if group is not None and (index - first) % 3 not in (group if isinstance(group, tuple) else (group,)):
             continue
         left = index * period + (hash_value(index, seed, 1) * 2 - 1) * jitter
         right = left

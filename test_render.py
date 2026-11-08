@@ -25,21 +25,22 @@ class RenderTests(unittest.TestCase):
                     ys[g]=next(y for y in range(10,350) if mask.getpixel((180,y))==255)
             photo=app.prepare_media(root/'photo.png','photo')
             video=app.prepare_media(root/'video.mp4','video',preview_video=False)
-            for phase in (0,.2):
-                output=root/f'out{phase}.mp4'
+            for mode,cycle,fps,phase in [('thirds',.5,30,0),('thirds',.5,30,.2),('second-others',1/18,60,0)]:
+                output=root/f'out{mode}{phase}.mp4'
                 job=app.start_render({'photo':photo['id'],'video':video['id'],
-                    'template':{**template,'stripePhase':phase,'duration':.5}},output)
+                    'template':{**template,'stripeMode':mode,'stripeCycle':cycle,'fps':fps,'stripePhase':phase,'duration':.5}},output)
                 while job['status']=='running': time.sleep(.05)
                 self.assertEqual(job['status'],'done',job.get('error'))
                 decoded=app.command([app.binary('ffmpeg'),'-v','error','-i',str(output),'-f','rawvideo','-pix_fmt','rgb24','-'],30)
                 self.assertEqual(decoded.returncode,0)
                 size=360*360*3
-                self.assertEqual(len(decoded.stdout)//size,15)
-                for n in range(15):
-                    active=(0,2,1)[int((n/30+phase)*6+1e-7)%3]
+                self.assertEqual(len(decoded.stdout)//size,fps//2)
+                groups=((0,),(2,),(1,)) if mode=='thirds' else ((1,),(0,2))
+                for n in range(fps//2):
+                    active=groups[int((n/fps+phase)*len(groups)/cycle+1e-7)%len(groups)]
                     for g,y in ys.items():
                         red=decoded.stdout[n*size+(y*360+180)*3]
-                        self.assertEqual(red<120,g==active,(phase,n,g,red,active))
+                        self.assertEqual(red<120,g in active,(mode,phase,n,g,red,active))
 
     def test_encoder_fallback(self):
         with patch.object(app, 'nvenc_available', return_value=False):
