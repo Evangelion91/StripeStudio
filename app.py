@@ -18,7 +18,7 @@ import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 RESOURCE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 HOME = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 DATA = HOME / "user-data"
@@ -26,6 +26,7 @@ EXPORTS = HOME / "exports"
 TOKEN = secrets.token_urlsafe(32)
 MEDIA: dict[str, dict] = {}
 JOBS: dict[str, dict] = {}
+BATCHES: dict[str, dict] = {}
 LOCK = threading.Lock()
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 DEFAULTS = {"schema": "stripe-studio/v1", "angle": -26, "randomAngle": True,
@@ -88,20 +89,22 @@ def probe(path: Path) -> dict:
 
 
 def prepare_media(path: Path, kind: str, name: str | None = None, preview_video: bool = True) -> dict:
-    info = probe(path)
+    info = probe(path) if kind == 'video' else {}
     ident = secrets.token_hex(12)
     folder = DATA / ident
     folder.mkdir(parents=True, exist_ok=True)
     original = path.resolve()
     preview = original
     if kind == "photo":
+        from PIL import Image, ImageOps
+        if path.suffix.lower() in ('.heic', '.heif'):
+            import pillow_heif
+            pillow_heif.register_heif_opener()
         preview = folder / "photo.png"
-        result = command([binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y", "-i", str(original),
-                          "-frames:v", "1", "-update", "1", str(preview)], 120)
-        if result.returncode:
-            raise ValueError("Это фото не удалось открыть. Попробуйте JPG, PNG или WebP.")
-        info.update(probe(preview))
-        info["duration"] = 0
+        with Image.open(original) as image:
+            normalized = ImageOps.exif_transpose(image).convert('RGB')
+            Image.frombytes('RGB', normalized.size, normalized.tobytes()).save(preview)
+        info = {'width': normalized.width, 'height': normalized.height, 'duration': 0, 'hasAudio': False}
     elif kind == "video":
         if info["duration"] <= 0:
             raise ValueError("Не удалось определить длительность видео.")
@@ -208,6 +211,8 @@ def start_render(payload: dict, out_path: Path | None = None) -> dict:
         raise ValueError("settings должен быть объектом.")
     settings = validate_settings({**template, **raw}, video)
     with LOCK:
+        if any(b['status'] == 'running' and payload.get('_batch') != b['id'] for b in BATCHES.values()):
+            raise ValueError("Сначала дождитесь завершения пакетной обработки.")
         if any(j["status"] == "running" for j in JOBS.values()):
             raise ValueError("Уже идёт экспорт. Дождитесь завершения или отмените его.")
         ident = secrets.token_hex(12)
@@ -328,6 +333,10 @@ def run_render(job, photo, video, mask):
             job["error"] = "Экспорт не завершён. Подробности сохранены в user-data / job / ffmpeg.log."
             job["output"].unlink(missing_ok=True)
         else:
+            from batch import clean_metadata
+            clean = job["output"].with_suffix('.clean.mp4')
+            clean_metadata(sys.modules[__name__], job["output"], clean)
+            clean.replace(job["output"])
             sidecar = {"schema": "stripe-studio/v1", **job["template"], "render": cfg}
             job["output"].with_suffix(".preset.json").write_text(json.dumps(sidecar, ensure_ascii=False, indent=2), encoding="utf-8")
             job["progress"] = 100
@@ -381,6 +390,11 @@ POST /api/render — JSON:
 }
 GET /api/jobs/ID
 POST /api/jobs/ID/cancel — {}
+POST /api/batches — JSON:
+{"photoDir":"C:/photos","videoDir":"C:/videos","outputDir":"C:/result",
+ "split":true,"splitThreshold":15,"maxPartSeconds":10,"template":{"encoder":"auto"}}
+GET /api/batches/ID — прогресс, имена файлов, ошибка
+POST /api/batches/ID/cancel — {}
 GET /exports/ID — MP4 после завершения
 POST /api/render-paths — JSON:
 {"photoPath":"C:/media/photo.jpg","videoPath":"C:/media/video.mp4",
@@ -467,6 +481,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         route = urllib.parse.urlparse(self.path).path
+        if route.startswith('/api/batches/'):
+            from batch import public_batch
+            state = BATCHES.get(route.split('/')[-1])
+            return self.reply(public_batch(state) if state else {'error': 'Пачка не найдена.'}, 200 if state else 404)
         if route == "/api/info":
             return self.reply({"version": VERSION, "ffmpeg": bool(binary("ffmpeg")), "photoDemo": "/assets/demo-photo.png", "videoDemo": "/assets/demo-video.mp4"})
         if route == "/api/docs":
@@ -523,6 +541,16 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 raise ValueError("Ожидается JSON-объект.")
+            if route.path == '/api/batches':
+                from batch import start_batch, public_batch
+                return self.reply(public_batch(start_batch(sys.modules[__name__], payload)))
+            if route.path.startswith('/api/batches/') and route.path.endswith('/cancel'):
+                from batch import cancel_batch, public_batch
+                state = BATCHES.get(route.path.split('/')[-2])
+                if not state:
+                    return self.reply({'error': 'Пачка не найдена.'}, 404)
+                cancel_batch(sys.modules[__name__], state)
+                return self.reply(public_batch(state))
             if route.path == "/api/render-paths":
                 template = payload.get("template", {})
                 if payload.get("presetPath"):
@@ -565,6 +593,10 @@ def serve(args):
     except KeyboardInterrupt:
         pass
     finally:
+        from batch import cancel_batch
+        for state in list(BATCHES.values()):
+            if state['status'] == 'running':
+                cancel_batch(sys.modules[__name__], state)
         for job in JOBS.values():
             if job["status"] == "running":
                 cancel_job(job)
@@ -589,6 +621,15 @@ def main():
     parser = argparse.ArgumentParser(description="Stripe Studio — static color photo + grayscale video through diagonal stripes.")
     parser.add_argument("--version", action="version", version=f"StripeStudio {VERSION}")
     sub = parser.add_subparsers(dest="mode")
+    batch_parser = sub.add_parser('batch', help='Every photo x every video; metadata removed')
+    batch_parser.add_argument('--photos', required=True, help='Photo directory; sorted by filename')
+    batch_parser.add_argument('--videos', required=True, help='Video directory; sorted by filename')
+    batch_parser.add_argument('--out', required=True, help='Output directory')
+    batch_parser.add_argument('--preset')
+    batch_parser.add_argument('--encoder', choices=('auto', 'cpu', 'nvenc'))
+    batch_parser.add_argument('--split', action='store_true', help='Split only renders longer than threshold')
+    batch_parser.add_argument('--split-threshold', type=float, default=15, help='Split renders longer than N seconds (default 15)')
+    batch_parser.add_argument('--max-part-seconds', type=float, default=10, help='Each part strictly shorter than N seconds (default 10)')
     server_parser = sub.add_parser("serve", help="Open local editor and HTTP API")
     server_parser.add_argument("--port", type=int, default=0)
     server_parser.add_argument("--no-open", action="store_true")
@@ -615,6 +656,26 @@ def main():
             args.port, args.no_open = 0, False
         return serve(args)
     template = load_template(args.preset)
+    if args.mode == 'batch':
+        from batch import start_batch, cancel_batch, public_batch
+        if args.encoder:
+            template['encoder'] = args.encoder
+        state = start_batch(sys.modules[__name__], {'photoDir': args.photos, 'videoDir': args.videos,
+            'outputDir': args.out, 'template': template, 'split': args.split,
+            'splitThreshold': args.split_threshold, 'maxPartSeconds': args.max_part_seconds})
+        previous = None
+        try:
+            while state['status'] == 'running':
+                snapshot = (state['completed'], state['status'])
+                if snapshot != previous:
+                    print(json.dumps(public_batch(state), ensure_ascii=False), flush=True)
+                    previous = snapshot
+                time.sleep(.25)
+        except KeyboardInterrupt:
+            cancel_batch(sys.modules[__name__], state)
+            return 130
+        print(json.dumps(public_batch(state), ensure_ascii=False), flush=True)
+        return 0 if state['status'] == 'done' else 1
     if args.mode == "mask":
         template = resolve_template(template)
         settings = settings_from_template(template)

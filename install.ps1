@@ -15,7 +15,7 @@ $pythonExe = & $pythonCmd.Source -c "import sys; assert sys.version_info >= (3,1
 if ($LASTEXITCODE -ne 0) { throw 'Python check failed.' }
 New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
 if ($targetDir.TrimEnd('\') -ne $sourceDir.TrimEnd('\')) {
-    foreach ($fileName in @('app.py','mask.py','requirements.txt','reference.preset.json','README.md','AGENTS.md')) {
+    foreach ($fileName in @('app.py','mask.py','batch.py','requirements.txt','reference.preset.json','README.md','AGENTS.md')) {
         Copy-Item -LiteralPath (Join-Path $sourceDir $fileName) -Destination (Join-Path $targetDir $fileName) -Force
     }
     foreach ($folderName in @('web','assets')) {
