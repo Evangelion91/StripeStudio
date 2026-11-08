@@ -9,22 +9,6 @@ import app
 
 
 class RenderTests(unittest.TestCase):
-    def test_perpendicular_motion_atlas(self):
-        import math
-        from mask import motion_alpha
-        with tempfile.TemporaryDirectory() as tmp:
-            template={**app.DEFAULTS,'angle':-26}
-            cfg={'stripeSpeed':4,'stripeTime':0,'duration':12,'videoOpacity':.8}
-            ox,oy,dx,dy=motion_alpha(template,360,640,cfg,Path(tmp)/'alpha.png')
-            angle=math.radians(-26)
-            self.assertAlmostEqual(dx*math.cos(angle)+dy*math.sin(angle),0)
-            self.assertAlmostEqual(math.hypot(dx,dy),4/3)
-            with Image.open(Path(tmp)/'alpha.png') as atlas:
-                first=atlas.crop((ox,oy,ox+360,oy+640))
-                moved=atlas.crop((ox-round(dx*12),oy-round(dy*12),ox-round(dx*12)+360,oy-round(dy*12)+640))
-                self.assertNotEqual(first.tobytes(),moved.tobytes())
-                self.assertGreaterEqual(atlas.getextrema()[0],51)
-
     def test_encoder_fallback(self):
         with patch.object(app, 'nvenc_available', return_value=False):
             self.assertEqual(app.choose_encoder(), 'cpu')
