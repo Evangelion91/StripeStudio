@@ -3,7 +3,7 @@
   const $ = (id) => document.getElementById(id);
   const token = document.querySelector('meta[name="template-token"]').content;
   const MIN_DURATION = .1;
-  const DEFAULTS = { schema: 'stripe-studio/v1', angle: -26, period: 34, share: 42, irregularity: 0, seed: 1234, videoOpacity: .65, randomAngle: true, format: '9:16', resolution: 1080, fps: 30, start: 0, duration: 0, audio: true, photo: { zoom: 1, x: .5, y: .5, mirror: false }, video: { zoom: 1, x: .5, y: .5, mirror: false } };
+  const DEFAULTS = { schema: 'stripe-studio/v1', angle: -26, period: 34, share: 42, irregularity: 0, seed: 1234, videoOpacity: .80, randomAngle: true, format: '9:16', resolution: 1080, fps: 30, start: 0, duration: 0, audio: true, photo: { zoom: 1, x: .5, y: .5, mirror: false }, video: { zoom: 1, x: .5, y: .5, mirror: false } };
   let settings = structuredClone(DEFAULTS);
   let photoSource = null, videoSource = null, photoImage = null, videoElement = null;
   let cropKind = 'photo', uploading = false, rendering = false, activeJob = null, pollTimer = null, pollFailures = 0;

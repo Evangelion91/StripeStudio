@@ -1,6 +1,7 @@
 """Stripe Studio: local diagonal photo/video compositor, HTTP API and CLI."""
 from __future__ import annotations
 
+import functools
 import argparse
 import base64
 import json
@@ -17,7 +18,7 @@ import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 RESOURCE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 HOME = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 DATA = HOME / "user-data"
@@ -29,8 +30,8 @@ LOCK = threading.Lock()
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 DEFAULTS = {"schema": "stripe-studio/v1", "angle": -26, "randomAngle": True,
             "period": 34, "share": 42, "irregularity": 0, "seed": 1234,
-            "videoOpacity": .65, "format": "9:16", "resolution": 1080, "fps": 30,
-            "start": 0, "duration": 0, "audio": True}
+            "videoOpacity": .80, "format": "9:16", "resolution": 1080, "fps": 30,
+            "start": 0, "duration": 0, "audio": True, "encoder": "auto"}
 
 
 def resolve_template(raw, choose_angle=True):
@@ -42,7 +43,7 @@ def resolve_template(raw, choose_angle=True):
         resolved["angle"] = secrets.randbelow(161) - 80
     resolved["angle"] = number(resolved.get("angle"), -80, 80, -26)
     resolved["randomAngle"] = False
-    resolved["videoOpacity"] = number(resolved.get("videoOpacity"), 0, 1, .65)
+    resolved["videoOpacity"] = number(resolved.get("videoOpacity"), 0, 1, .80)
     return resolved
 
 
@@ -170,8 +171,8 @@ def validate_settings(raw: dict, media: dict) -> dict:
     if duration < .05:
         raise ValueError("Выберите непустой отрезок видео.")
     return {"width": width, "height": height, "fps": fps, "start": start, "duration": duration,
-            "videoOpacity": number(raw.get("videoOpacity"), 0, 1, .65),
-            "audio": raw.get("audio", True) is True, "photo": framing(raw.get("photo")), "video": framing(raw.get("video"))}
+            "videoOpacity": number(raw.get("videoOpacity"), 0, 1, .80),
+            "encoder": raw.get("encoder", "auto"), "audio": raw.get("audio", True) is True, "photo": framing(raw.get("photo")), "video": framing(raw.get("video"))}
 
 
 def make_mask(template: dict, width: int, height: int, target: Path):
@@ -244,25 +245,67 @@ def start_render(payload: dict, out_path: Path | None = None) -> dict:
     return job
 
 
+@functools.lru_cache(maxsize=1)
+def nvenc_available():
+    try:
+        result = command([binary("ffmpeg"), "-v", "error", "-f", "lavfi", "-i", "color=s=256x256:r=1",
+                          "-frames:v", "1", "-c:v", "h264_nvenc", "-f", "null", "-"], 20)
+        return result.returncode == 0
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+
+
+def choose_encoder(mode="auto"):
+    if mode not in ("auto", "cpu", "nvenc"):
+        raise ValueError("encoder должен быть auto, cpu или nvenc.")
+    if mode == "cpu":
+        return "cpu"
+    if nvenc_available():
+        return "nvenc"
+    if mode == "nvenc":
+        raise ValueError("NVENC недоступен. Проверьте NVIDIA GPU, драйвер и сборку FFmpeg.")
+    return "cpu"
+
+
+def prepare_static_layer(photo, mask, cfg, target):
+    from PIL import Image
+    cropped = target.with_name("cropped-photo.png")
+    result = command([binary("ffmpeg"), "-v", "error", "-nostdin", "-n", "-i", str(photo),
+                      "-vf", crop_filter(cfg["width"], cfg["height"], cfg["photo"]),
+                      "-frames:v", "1", "-update", "1", str(cropped)], 120)
+    if result.returncode:
+        raise ValueError("Не удалось подготовить неподвижный слой фото.")
+    with Image.open(cropped) as image, Image.open(mask) as mask_image:
+        layer = image.convert("RGBA")
+        alpha = mask_image.convert("L").point(lambda x: round(255 - x * cfg["videoOpacity"]))
+        layer.putalpha(alpha)
+        layer.save(target)
+
+
 def run_render(job, photo, video, mask):
     cfg = job["settings"]
     width, height, fps = cfg["width"], cfg["height"], cfg["fps"]
-    graph = (f"[0:v:0]setpts=PTS-STARTPTS,fps={fps},{crop_filter(width, height, cfg['video'])},hue=s=0,format=gbrp[v];"
-             f"[1:v:0]setpts=PTS-STARTPTS,{crop_filter(width, height, cfg['photo'])},format=gbrp[p];"
-             f"[2:v:0]format=gbrp[m];[p]split[pbase][pmix];"
-             f"[pmix][v]blend=all_expr='A*{1-cfg['videoOpacity']:.8f}+B*{cfg['videoOpacity']:.8f}'[mix];"
-             "[pbase][mix][m]maskedmerge=planes=7,format=yuv420p[out]")
-    args = [binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-            "-ss", str(cfg["start"]), "-i", str(video["path"]),
-            "-loop", "1", "-framerate", str(fps), "-i", str(photo["preview"]),
-            "-loop", "1", "-framerate", str(fps), "-i", str(mask),
-            "-filter_complex_threads", "2", "-filter_complex", graph, "-map", "[out]"]
-    if cfg["audio"]:
-        args += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "192k"]
-    args += ["-t", str(cfg["duration"]), "-r", str(fps), "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-             "-threads", "4", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-progress", "pipe:1", str(job["output"])]
     process = None
     try:
+        # Render the static photo crop once, rather than decoding a large original every frame.
+        layer = job["folder"] / "static-layer.png"
+        prepare_static_layer(photo["preview"], mask, cfg, layer)
+        mode = cfg.get("encoder", "auto")
+        encoder = choose_encoder("cpu" if mode == "auto" and min(width, height) < 256 else mode)
+        job["encoder"] = encoder
+        graph = (f"[0:v:0]setpts=PTS-STARTPTS,fps={fps},{crop_filter(width, height, cfg['video'])},hue=s=0,format=yuv420p[v];"
+                 "[v][1:v:0]overlay=shortest=1:format=yuv420[out]")
+        args = [binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+                "-threads", "4", "-ss", str(cfg["start"]), "-i", str(video["path"]),
+                "-loop", "1", "-framerate", str(fps), "-i", str(layer),
+                "-filter_complex_threads", "2", "-filter_complex", graph, "-map", "[out]"]
+        if cfg["audio"]:
+            args += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "192k"]
+        codec = (["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "18", "-b:v", "0"]
+                 if encoder == "nvenc" else ["-c:v", "libx264", "-preset", "fast", "-crf", "18"])
+        args += ["-t", str(cfg["duration"]), "-r", str(fps), *codec, "-threads", "4", "-pix_fmt", "yuv420p",
+                 "-map_metadata", "-1", "-map_metadata:s", "-1", "-map_chapters", "-1",
+                 "-movflags", "+faststart", "-progress", "pipe:1", str(job["output"])]
         with (job["folder"] / "ffmpeg.log").open("wb") as err:
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=err, text=True, creationflags=NO_WINDOW)
             job["process"] = process
@@ -301,11 +344,14 @@ def run_render(job, photo, video, mask):
         job["status"] = "error"
         job["output"].unlink(missing_ok=True)
     finally:
+        if process and process.stdout:
+            process.stdout.close()
         job["process"] = None
 
 
 def public_job(job: dict) -> dict:
-    return {k: job[k] for k in ("id", "status", "progress", "url", "name", "error", "angle")}
+    return {**{k: job[k] for k in ("id", "status", "progress", "url", "name", "error", "angle")},
+            "encoder": job.get("encoder")}
 
 
 def cancel_job(job):
@@ -331,7 +377,7 @@ POST /api/render — JSON:
   "settings": {"width":1080,"height":1920,"fps":30,"start":0,"duration":0,
     "audio":true,"photo":{"zoom":1,"x":0.5,"y":0.5,"mirror":false},
     "video":{"zoom":1,"x":0.5,"y":0.5,"mirror":false}},
-  "template": {"randomAngle":true,"period":34,"share":42,"irregularity":0,"videoOpacity":0.65}
+  "template": {"randomAngle":true,"period":34,"share":42,"irregularity":0,"videoOpacity":0.80}
 }
 GET /api/jobs/ID
 POST /api/jobs/ID/cancel — {}
@@ -551,8 +597,9 @@ def main():
     render.add_argument("--video", required=True)
     render.add_argument("--out", required=True)
     render.add_argument("--preset")
+    render.add_argument("--encoder", choices=("auto", "cpu", "nvenc"), default=None, help="Auto prefers NVIDIA NVENC; otherwise CPU")
     render.add_argument("--angle", type=float, help="Fixed common angle -80..80; default random")
-    render.add_argument("--video-opacity", type=float, help="Video fraction 0..1; default .65")
+    render.add_argument("--video-opacity", type=float, help="Video fraction 0..1; default .80")
     render.add_argument("--start", type=float)
     render.add_argument("--duration", type=float)
     render.add_argument("--fps", type=int, choices=(24, 25, 30, 50, 60))
@@ -578,7 +625,7 @@ def main():
         make_mask(template, settings["width"], settings["height"], target)
         print(str(target))
         return 0
-    for field in ("start", "duration", "fps", "width", "height"):
+    for field in ("start", "duration", "fps", "width", "height", "encoder"):
         if getattr(args, field) is not None:
             template[field] = getattr(args, field)
     if args.silent:
