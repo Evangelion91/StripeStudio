@@ -71,7 +71,7 @@ class BatchTests(unittest.TestCase):
                 self.assertEqual(result.returncode,0)
             with patch.object(app,'DATA',root/'data'),patch.object(app,'BATCHES',{}),patch.object(app,'JOBS',{}),patch.object(app,'MEDIA',{}):
                 payload={'photoDir':str(photos),'videoDir':str(videos),'outputDir':str(root/'out'),
-                         'template':{'width':128,'height':128,'encoder':'cpu'},
+                         'template':{'width':128,'height':128,'encoder':'cpu','stripeSpeed':4},
                          'split':True,'splitThreshold':1,'maxPartSeconds':.7}
                 state=batch.start_batch(app,payload)
                 with self.assertRaises(ValueError):
@@ -82,6 +82,7 @@ class BatchTests(unittest.TestCase):
                 self.assertEqual(state['status'],'done',state['error'])
                 self.assertEqual(state['completed'],4)
                 self.assertEqual(len(state['files']),8)
+                self.assertTrue(any(j['settings']['stripeTime']>0 for j in app.JOBS.values()))
                 for name in state['files']:
                     info=batch.verify_clean(app,root/'out'/name)
                     self.assertTrue(any(s['codec_type']=='audio' for s in info['streams']))

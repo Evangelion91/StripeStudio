@@ -18,7 +18,7 @@ import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 RESOURCE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 HOME = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 DATA = HOME / "user-data"
@@ -32,7 +32,7 @@ NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 DEFAULTS = {"schema": "stripe-studio/v1", "angle": -26, "randomAngle": True,
             "period": 34, "share": 42, "irregularity": 0, "seed": 1234,
             "videoOpacity": .80, "format": "9:16", "resolution": 1080, "fps": 30,
-            "start": 0, "duration": 0, "audio": True, "encoder": "auto"}
+            "start": 0, "duration": 0, "audio": True, "encoder": "auto", "stripeSpeed": 0}
 
 
 def resolve_template(raw, choose_angle=True):
@@ -174,6 +174,8 @@ def validate_settings(raw: dict, media: dict) -> dict:
     if duration < .05:
         raise ValueError("Выберите непустой отрезок видео.")
     return {"width": width, "height": height, "fps": fps, "start": start, "duration": duration,
+            "stripeSpeed": number(raw.get('stripeSpeed'), -30, 30, 0),
+            "stripeTime": number(raw.get('stripeTime'), 0, 86400, 0),
             "videoOpacity": number(raw.get("videoOpacity"), 0, 1, .80),
             "encoder": raw.get("encoder", "auto"), "audio": raw.get("audio", True) is True, "photo": framing(raw.get("photo")), "video": framing(raw.get("video"))}
 
@@ -210,6 +212,8 @@ def start_render(payload: dict, out_path: Path | None = None) -> dict:
     if not isinstance(raw, dict):
         raise ValueError("settings должен быть объектом.")
     settings = validate_settings({**template, **raw}, video)
+    if payload.get('mask') and settings['stripeSpeed']:
+        raise ValueError('Для движения используйте генерируемую маску, без поля mask.')
     with LOCK:
         if any(b['status'] == 'running' and payload.get('_batch') != b['id'] for b in BATCHES.values()):
             raise ValueError("Сначала дождитесь завершения пакетной обработки.")
@@ -302,8 +306,17 @@ def run_render(job, photo, video, mask):
                  "[v][1:v:0]overlay=shortest=1:format=yuv420[out]")
         args = [binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
                 "-threads", "4", "-ss", str(cfg["start"]), "-i", str(video["path"]),
-                "-loop", "1", "-framerate", str(fps), "-i", str(layer),
-                "-filter_complex_threads", "2", "-filter_complex", graph, "-map", "[out]"]
+                "-loop", "1", "-framerate", str(fps), "-i", str(layer)]
+        if cfg['stripeSpeed']:
+            from mask import motion_alpha
+            atlas = job['folder'] / 'motion-alpha.png'
+            ox, oy, dx, dy = motion_alpha(job['template'], width, height, cfg, atlas)
+            args += ['-loop', '1', '-framerate', str(fps), '-i', str(atlas)]
+            graph = (f"[0:v:0]setpts=PTS-STARTPTS,fps={fps},{crop_filter(width,height,cfg['video'])},hue=s=0,format=yuv420p[v];"
+                     f"[2:v:0]crop={width}:{height}:x='{ox}-({dx:.10f})*(t+{cfg['stripeTime']:.10f})':"
+                     f"y='{oy}-({dy:.10f})*(t+{cfg['stripeTime']:.10f})':exact=1[a];"
+                     "[1:v:0]format=rgb24[p];[p][a]alphamerge[layer];[v][layer]overlay=shortest=1:format=yuv420[out]")
+        args += ["-filter_complex_threads", "2", "-filter_complex", graph, "-map", "[out]"]
         if cfg["audio"]:
             args += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "192k"]
         codec = (["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "18", "-b:v", "0"]
@@ -638,6 +651,7 @@ def main():
     render.add_argument("--video", required=True)
     render.add_argument("--out", required=True)
     render.add_argument("--preset")
+    render.add_argument('--stripe-speed', type=float, help='Perpendicular stripe drift: px/s at 1080, -30..30; 0 disables')
     render.add_argument("--encoder", choices=("auto", "cpu", "nvenc"), default=None, help="Auto prefers NVIDIA NVENC; otherwise CPU")
     render.add_argument("--angle", type=float, help="Fixed common angle -80..80; default random")
     render.add_argument("--video-opacity", type=float, help="Video fraction 0..1; default .80")
@@ -686,6 +700,8 @@ def main():
         make_mask(template, settings["width"], settings["height"], target)
         print(str(target))
         return 0
+    if args.stripe_speed is not None:
+        template['stripeSpeed'] = args.stripe_speed
     for field in ("start", "duration", "fps", "width", "height", "encoder"):
         if getattr(args, field) is not None:
             template[field] = getattr(args, field)

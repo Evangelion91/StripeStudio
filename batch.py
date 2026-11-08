@@ -133,6 +133,7 @@ def run_batch(engine, state, photos, videos, out, template, split, threshold, ma
                     name = f'{i}_{j}_part{part:02d}.mp4' if len(plan) > 1 else f'{i}_{j}.mp4'
                     target = folder / name
                     segment = {**resolved, 'start': cfg['start'] + offset / cfg['fps'],
+                               'stripeTime': cfg['stripeTime'] + offset / cfg['fps'],
                                'duration': min(length / cfg['fps'], cfg['duration'] - offset / cfg['fps'])}
                     job = engine.start_render({'photo': photo_record['id'], 'video': video_record['id'],
                                                'template': segment, '_batch': state['id']}, target)
