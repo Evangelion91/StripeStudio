@@ -71,7 +71,7 @@ class BatchTests(unittest.TestCase):
                 self.assertEqual(result.returncode,0)
             with patch.object(app,'DATA',root/'data'),patch.object(app,'BATCHES',{}),patch.object(app,'JOBS',{}),patch.object(app,'MEDIA',{}):
                 payload={'photoDir':str(photos),'videoDir':str(videos),'outputDir':str(root/'out'),
-                         'template':{'width':128,'height':128,'encoder':'cpu'},
+                         'template':{'width':128,'height':128,'encoder':'cpu','stripeMode':'thirds'},
                          'split':True,'splitThreshold':1,'maxPartSeconds':.7}
                 state=batch.start_batch(app,payload)
                 with self.assertRaises(ValueError):

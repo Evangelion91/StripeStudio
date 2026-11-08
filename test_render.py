@@ -9,6 +9,38 @@ import app
 
 
 class RenderTests(unittest.TestCase):
+    def test_thirds_order_and_timing(self):
+        from mask import save_mask
+        with tempfile.TemporaryDirectory() as tmp, patch.object(app,'DATA',Path(tmp)/'data'):
+            root=Path(tmp)
+            Image.new('RGB',(360,360),(220,20,20)).save(root/'photo.png')
+            made=app.command([app.binary('ffmpeg'),'-v','error','-f','lavfi','-i','color=c=black:s=360x360:r=30',
+                              '-t','1','-c:v','libx264','-pix_fmt','yuv420p',str(root/'video.mp4')],30)
+            self.assertEqual(made.returncode,0)
+            template={**app.DEFAULTS,'angle':0,'randomAngle':False,'width':360,'height':360,'stripeMode':'thirds','encoder':'cpu'}
+            ys={}
+            for g in range(3):
+                save_mask(template,360,360,root/f'g{g}.png',g)
+                with Image.open(root/f'g{g}.png') as mask:
+                    ys[g]=next(y for y in range(10,350) if mask.getpixel((180,y))==255)
+            photo=app.prepare_media(root/'photo.png','photo')
+            video=app.prepare_media(root/'video.mp4','video',preview_video=False)
+            for phase in (0,.2):
+                output=root/f'out{phase}.mp4'
+                job=app.start_render({'photo':photo['id'],'video':video['id'],
+                    'template':{**template,'stripePhase':phase,'duration':.5}},output)
+                while job['status']=='running': time.sleep(.05)
+                self.assertEqual(job['status'],'done',job.get('error'))
+                decoded=app.command([app.binary('ffmpeg'),'-v','error','-i',str(output),'-f','rawvideo','-pix_fmt','rgb24','-'],30)
+                self.assertEqual(decoded.returncode,0)
+                size=360*360*3
+                self.assertEqual(len(decoded.stdout)//size,15)
+                for n in range(15):
+                    active=(0,2,1)[int((n/30+phase)*6+1e-7)%3]
+                    for g,y in ys.items():
+                        red=decoded.stdout[n*size+(y*360+180)*3]
+                        self.assertEqual(red<120,g==active,(phase,n,g,red,active))
+
     def test_encoder_fallback(self):
         with patch.object(app, 'nvenc_available', return_value=False):
             self.assertEqual(app.choose_encoder(), 'cpu')

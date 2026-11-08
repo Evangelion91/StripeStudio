@@ -19,7 +19,7 @@ def hash_value(index, seed, channel):
     return n / 4294967295
 
 
-def polygons(template, width, height):
+def polygons(template, width, height, group=None):
     angle = numeric(template.get("angle"), -26, -80, 80) * math.pi / 180
     period = numeric(template.get("period"), 34, 8, 90) * min(width, height) / 1080
     share = numeric(template.get("share"), 42, 10, 90) / 100
@@ -30,7 +30,11 @@ def polygons(template, width, height):
     jitter = min(period * .25 * irregularity, gap * .28, white * .28)
     dw = min(white * .3, gap * .18) * irregularity
     cosine, sine = math.cos(angle), math.sin(angle)
+    minimum = -(abs(sine) * width + abs(cosine) * height) / 2
+    first = math.floor((minimum - white) / period) + 1
     for index in range(math.floor(-length / period) - 2, math.ceil(length / period) + 3):
+        if group is not None and (index - first) % 3 != group:
+            continue
         left = index * period + (hash_value(index, seed, 1) * 2 - 1) * jitter
         right = left
         left_width = white + (hash_value(index, seed, 3) * 2 - 1) * dw
@@ -39,11 +43,11 @@ def polygons(template, width, height):
                for u, v in ((-length, left), (length, right), (length, right + right_width), (-length, left + left_width))]
 
 
-def save_mask(template, width, height, target: Path):
+def save_mask(template, width, height, target: Path, group=None):
     aa = 4
     image = Image.new("L", (width * aa, height * aa), 0)
     draw = ImageDraw.Draw(image)
-    for points in polygons(template, width, height):
+    for points in polygons(template, width, height, group):
         draw.polygon([(round(x * aa - .5), round(y * aa - .5)) for x, y in points], fill=255)
     image = image.resize((width, height), Image.Resampling.LANCZOS)
     image.save(target, optimize=True)

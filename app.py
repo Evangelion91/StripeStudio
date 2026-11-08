@@ -18,7 +18,7 @@ import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 RESOURCE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 HOME = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 DATA = HOME / "user-data"
@@ -32,7 +32,8 @@ NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 DEFAULTS = {"schema": "stripe-studio/v1", "angle": -26, "randomAngle": True,
             "period": 34, "share": 42, "irregularity": 0, "seed": 1234,
             "videoOpacity": .80, "format": "9:16", "resolution": 1080, "fps": 30,
-            "start": 0, "duration": 0, "audio": True, "encoder": "auto"}
+            "start": 0, "duration": 0, "audio": True, "encoder": "auto",
+            "stripeMode": "all", "stripeCycle": .5}
 
 
 def resolve_template(raw, choose_angle=True):
@@ -159,6 +160,8 @@ def settings_from_template(template: dict) -> dict:
 
 
 def validate_settings(raw: dict, media: dict) -> dict:
+    if raw.get('stripeMode', 'all') not in ('all', 'thirds'):
+        raise ValueError('stripeMode должен быть all или thirds.')
     width = int(number(raw.get("width"), 128, 3840, 1080)) // 2 * 2
     height = int(number(raw.get("height"), 128, 3840, 1920)) // 2 * 2
     try:
@@ -174,6 +177,9 @@ def validate_settings(raw: dict, media: dict) -> dict:
     if duration < .05:
         raise ValueError("Выберите непустой отрезок видео.")
     return {"width": width, "height": height, "fps": fps, "start": start, "duration": duration,
+            "stripeMode": raw.get('stripeMode', 'all'),
+            "stripeCycle": number(raw.get('stripeCycle'), .1, 10, .5),
+            "stripePhase": number(raw.get('stripePhase'), 0, 86400, 0),
             "videoOpacity": number(raw.get("videoOpacity"), 0, 1, .80),
             "encoder": raw.get("encoder", "auto"), "audio": raw.get("audio", True) is True, "photo": framing(raw.get("photo")), "video": framing(raw.get("video"))}
 
@@ -210,6 +216,8 @@ def start_render(payload: dict, out_path: Path | None = None) -> dict:
     if not isinstance(raw, dict):
         raise ValueError("settings должен быть объектом.")
     settings = validate_settings({**template, **raw}, video)
+    if payload.get('mask') and settings['stripeMode'] != 'all':
+        raise ValueError('Для групп полос используйте генерируемую маску, без поля mask.')
     with LOCK:
         if any(b['status'] == 'running' and payload.get('_batch') != b['id'] for b in BATCHES.values()):
             raise ValueError("Сначала дождитесь завершения пакетной обработки.")
@@ -300,9 +308,26 @@ def run_render(job, photo, video, mask):
         job["encoder"] = encoder
         graph = (f"[0:v:0]setpts=PTS-STARTPTS,fps={fps},{crop_filter(width, height, cfg['video'])},hue=s=0,format=yuv420p[v];"
                  "[v][1:v:0]overlay=shortest=1:format=yuv420[out]")
+        layer_rate = fps
+        if cfg['stripeMode'] == 'thirds':
+            from mask import save_mask
+            from PIL import Image
+            with Image.open(job['folder'] / 'cropped-photo.png') as image:
+                for phase, group in enumerate((0, 2, 1)):
+                    group_mask = job['folder'] / f'group-{group}.png'
+                    save_mask(job['template'], width, height, group_mask, group)
+                    with Image.open(group_mask) as mi:
+                        frame = image.convert('RGBA')
+                        frame.putalpha(mi.convert('L').point(lambda x: round(255-x*cfg['videoOpacity'])))
+                        frame.save(job['folder'] / f'phase-{phase}.png')
+            layer = job['folder'] / 'phase-%d.png'
+            layer_rate = 3 / cfg['stripeCycle']
+            graph = (f"[0:v:0]setpts=PTS-STARTPTS,fps={fps},{crop_filter(width,height,cfg['video'])},hue=s=0,format=yuv420p[v];"
+                     f"[1:v:0]settb=expr=1/90000,setpts=PTS-{cfg['stripePhase']:.10f}/TB[p];"
+                     "[v][p]overlay=shortest=1:format=yuv420[out]")
         args = [binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
                 "-threads", "4", "-ss", str(cfg["start"]), "-i", str(video["path"]),
-                "-loop", "1", "-framerate", str(fps), "-i", str(layer),
+                "-loop", "1", "-framerate", str(layer_rate), "-i", str(layer),
                 "-filter_complex_threads", "2", "-filter_complex", graph, "-map", "[out]"]
         if cfg["audio"]:
             args += ["-map", "0:a:0?", "-c:a", "aac", "-b:a", "192k"]
@@ -638,6 +663,8 @@ def main():
     render.add_argument("--video", required=True)
     render.add_argument("--out", required=True)
     render.add_argument("--preset")
+    render.add_argument('--stripe-mode', choices=('all', 'thirds'), help='All stripes or groups 1 -> 3 -> 2')
+    render.add_argument('--stripe-cycle', type=float, help='Full thirds cycle in seconds; default .5')
     render.add_argument("--encoder", choices=("auto", "cpu", "nvenc"), default=None, help="Auto prefers NVIDIA NVENC; otherwise CPU")
     render.add_argument("--angle", type=float, help="Fixed common angle -80..80; default random")
     render.add_argument("--video-opacity", type=float, help="Video fraction 0..1; default .80")
@@ -686,6 +713,10 @@ def main():
         make_mask(template, settings["width"], settings["height"], target)
         print(str(target))
         return 0
+    if args.stripe_mode is not None:
+        template['stripeMode'] = args.stripe_mode
+    if args.stripe_cycle is not None:
+        template['stripeCycle'] = args.stripe_cycle
     for field in ("start", "duration", "fps", "width", "height", "encoder"):
         if getattr(args, field) is not None:
             template[field] = getattr(args, field)
